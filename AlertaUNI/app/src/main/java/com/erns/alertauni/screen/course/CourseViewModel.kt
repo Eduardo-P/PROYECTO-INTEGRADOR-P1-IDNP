@@ -4,14 +4,10 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.erns.alertauni.data.model.ClassCodeRequest
-import com.erns.alertauni.data.model.CourseCatalogEntity
 import com.erns.alertauni.data.model.CourseEnrollRequest
-import com.erns.alertauni.data.model.GoogleAccountRequest
 import com.erns.alertauni.data.model.StudentEnrollment
-import com.erns.alertauni.data.repository.CourseRepository
 import com.erns.alertauni.data.repository.StudentRepository
 import com.erns.alertauni.domain.manager.DataStoreHelper
-import com.erns.alertauni.screen.post.PostViewModel.PostState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,20 +22,16 @@ class CourseViewModel @Inject constructor(
 ) : ViewModel() {
     private val TAG = "CourseViewModel"
 
-    sealed class CourseState {
-        object Loading : CourseState()
-        object Saved : CourseState()
-        object UnSaved : CourseState()
-    }
+    // Estado de la UI para el proceso de inscripcion (ahora con 8 estados)
+    private val _enrollUiState = MutableStateFlow<EnrollUiState>(EnrollUiState.Idle)
+    val enrollUiState: StateFlow<EnrollUiState> = _enrollUiState.asStateFlow()
 
-    private val _courseState = MutableStateFlow<CourseState>(CourseState.Loading)
-    val courseState: StateFlow<CourseState> = _courseState
+    // Lista de cursos en los que ya esta inscrito
     private val _studentEnrollmentList = MutableStateFlow<List<StudentEnrollment>>(emptyList())
     val studentEnrollmentList: StateFlow<List<StudentEnrollment>> =
         _studentEnrollmentList.asStateFlow()
-    private val _studentEnrollment = MutableStateFlow<StudentEnrollment?>(null)
-    val studentEnrollment: StateFlow<StudentEnrollment?> =
-        _studentEnrollment.asStateFlow()
+
+    // Nombre del usuario para mostrar arriba
     private val _username = MutableStateFlow("")
     val username: StateFlow<String> = _username
 
@@ -59,41 +51,62 @@ class CourseViewModel @Inject constructor(
             studentRepository.getStudentEnrollment()
                 .onSuccess {
                     _studentEnrollmentList.value = it
-
                 }.onFailure {
                     Log.d(TAG, it.message.toString())
                 }
         }
-
     }
 
+    // Busca un curso por codigo alfanumerico
     fun findCourse(classCode: String) {
+        // Validar que no este vacio
+        if (classCode.isBlank()) {
+            _enrollUiState.value = EnrollUiState.Error("Ingrese un código válido")
+            return
+        }
+
+        _enrollUiState.value = EnrollUiState.Searching
+        Log.d(TAG, "Buscando curso con codigo: $classCode")
+
         viewModelScope.launch {
-            studentRepository.findCourse(ClassCodeRequest(classCode = classCode)).onSuccess {
-                Log.d(TAG, "succefull")
-                _studentEnrollment.value = it
-            }.onFailure {
-                Log.d(TAG, it.message.toString())
-                _studentEnrollment.value = null
-            }
+            studentRepository.findCourse(ClassCodeRequest(classCode = classCode))
+                .onSuccess {
+                    Log.d(TAG, "Curso encontrado: ${it.courseName}")
+                    _enrollUiState.value = EnrollUiState.Found(it)
+                }
+                .onFailure {
+                    Log.d(TAG, "No se encontro: ${it.message}")
+                    _enrollUiState.value = EnrollUiState.NotFound
+                }
         }
     }
 
-    fun clearEnrollment() {
-        _studentEnrollment.value = null
-    }
+    // Registra al estudiante en el curso
+    fun courseEnroll(courseCatalogId: String, courseName: String) {
+        _enrollUiState.value = EnrollUiState.Enrolling
+        Log.d(TAG, "Registrando en curso: $courseName")
 
-    fun courseEnroll(courseCatalogId: String) {
         viewModelScope.launch {
             studentRepository.courseEnroll(CourseEnrollRequest(courseCatalogId = courseCatalogId))
                 .onSuccess {
-                    Log.d(TAG, "Created " + it.created)
+                    Log.d(TAG, "Registro exitoso: ${it.created}")
                     getCourses()
-                    _courseState.value = CourseState.Saved
-                }.onFailure {
-                    Log.d(TAG, it.message.toString())
-                    _courseState.value = CourseState.UnSaved
+                    _enrollUiState.value = EnrollUiState.Enrolled(courseName)
+                }
+                .onFailure {
+                    Log.d(TAG, "Error al registrar: ${it.message}")
+                    // Verificar si ya esta registrado
+                    if (it.message != null && it.message!!.contains("duplicate", ignoreCase = true)) {
+                        _enrollUiState.value = EnrollUiState.AlreadyEnrolled
+                    } else {
+                        _enrollUiState.value = EnrollUiState.Error("No se pudo completar el registro")
+                    }
                 }
         }
+    }
+
+    // Reiniciar el estado cuando se cierra el dialogo
+    fun resetEnrollState() {
+        _enrollUiState.value = EnrollUiState.Idle
     }
 }
